@@ -84,13 +84,13 @@
       });
     }
 
-    // 最新モデルを最優先し、混雑時は安定版へ切り替えるリスト
+        // 正確な最新APIバージョンモデル名を指定 (2026年9月現在)
     const CANDIDATE_MODELS = [
-      "gemini-3.6-flash", // 最新の高速モデル（最優先）
-      "gemini-3.6-pro",   // 最新の高性能モデル
-      "gemini-1.5-flash", // 安定版の高速モデル
-      "gemini-1.5-pro"    // 安定版の高性能モデル
+      "gemini-3.8-flash", // 最新の高速・軽量モデル
+      "gemini-3.8-pro",   // 最新の高性能モデル
+      "gemini-2.5-flash" // フォールバック用安定版
     ];
+
 
     async function generateWithFallback(apiKey, requestPayload) {
       let lastError = null;
@@ -142,7 +142,6 @@
         const prompt = `
 添付資料（PDF/画像）の中から、「赤色（または朱色・ピンク・赤マーカー）」で書かれている重要単語や数値を抜き出してください。
 それぞれの単語について、前後の文脈を生かした穴埋め問題を作成してください。
-※まとめや解説は一切不要です。穴埋め問題のみを返してください。
 
 必ず以下のJSON配列形式のみを出力してください:
 [
