@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>国試PDFノート穴埋め学習</title>
+
+  <!-- iOS / iPadOS PWA 設定 -->
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="国試ノート">
+  <link rel="apple-touch-icon" href="https://api.iconify.design/lucide:book-open.svg?color=%232563eb&width=180&height=180">
+  <meta name="theme-color" content="#2563eb">
+
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+</head>
+
+<body class="bg-slate-50 min-h-screen text-slate-800 p-4 md:p-8">
+
+  <div class="max-w-2xl mx-auto bg-white rounded-2xl shadow-sm border border-slate-200 p-6 space-y-6">
+    <header class="border-b pb-4">
+      <h1 class="text-xl font-bold text-slate-900">医師国試 PDF穴埋め＆AI要約ジェネレーター</h1>
+      <p class="text-sm text-slate-500 mt-1">PDF・ノート画像を読み込んで、赤文字の穴埋め問題と解説を生成します。</p>
+    </header>
+
+    <!-- APIキー入力 -->
+    <div>
+      <label class="block text-xs font-semibold text-slate-600 mb-1">Gemini API Key</label>
+      <input type="password" id="apiKey" placeholder="AIzaSy..." class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-blue-500">
+      <p class="text-[11px] text-slate-400 mt-1">※キーはブラウザ内でのみ使用され、どこにも保存・送信されません。</p>
+    </div>
+
+    <!-- ファイルアップロード -->
+    <div>
+      <label class="block text-xs font-semibold text-slate-600 mb-1">まとめノート（PDFまたは画像）</label>
+      <input type="file" id="fileInput" accept="application/pdf,image/*" class="w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100">
+    </div>
+
+    <button id="processBtn" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-medium py-2.5 rounded-lg transition disabled:bg-slate-300">
+      赤文字を抽出して問題を生成する
+    </button>
+
+    <!-- 処理ステータス -->
+    <div id="status" class="hidden text-sm text-center font-medium text-blue-600 animate-pulse">
+      PDFを解析中...
+    </div>
+
+    <!-- 生成結果エリア -->
+    <div id="resultArea" class="hidden space-y-6 pt-4 border-t border-slate-100">
+      <!-- 要約 -->
+      <div class="bg-blue-50/50 border border-blue-100 rounded-xl p-4">
+        <h2 class="text-xs font-bold text-blue-800 uppercase tracking-wider mb-1">知識の要約・ポイント</h2>
+        <p id="summaryText" class="text-sm text-slate-700 leading-relaxed whitespace-pre-wrap"></p>
+      </div>
+
+      <!-- 問題一覧 -->
+      <div class="space-y-4">
+        <h2 class="text-sm font-bold text-slate-800">穴埋め問題演習</h2>
+        <div id="questionsList" class="space-y-3"></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+    const apiKeyInput = document.getElementById('apiKey');
+    const fileInput = document.getElementById('fileInput');
+    const processBtn = document.getElementById('processBtn');
+    const statusDiv = document.getElementById('status');
+    const resultArea = document.getElementById('resultArea');
+    const summaryText = document.getElementById('summaryText');
+    const questionsList = document.getElementById('questionsList');
+
+    // 以前入力したAPIキーがあれば自動復元
+    apiKeyInput.value = localStorage.getItem('gemini_api_key') || '';
+    apiKeyInput.addEventListener('change', () => localStorage.setItem('gemini_api_key', apiKeyInput.value));
+
+    // ファイルをbase64画像に変換するヘルパー
+    async function getBase64Image(file) {
+      if (file.type === 'application/pdf') {
+        const arrayBuffer = await file.arrayBuffer();
+        const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+        const page = await pdf.getPage(1); // ひとまず1ページ目を対象
+        const viewport = page.getViewport({ scale: 1.5 });
+        
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+        canvas.width = viewport.width;
+        canvas.height = viewport.height;
+        await page.render({ canvasContext: ctx, viewport }).promise;
+        return canvas.toDataURL('image/jpeg', 0.8).split(',')[1];
+      } else {
+        return new Promise((resolve) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result.split(',')[1]);
+          reader.readAsDataURL(file);
+        });
+      }
+    }
+
+    processBtn.addEventListener('click', async () => {
+      const apiKey = apiKeyInput.value.trim();
+      const file = fileInput.files[0];
+
+      if (!apiKey) return alert('API Keyを入力してください');
+      if (!file) return alert('PDFまたは画像ファイルを選択してください');
+
+      processBtn.disabled = true;
+      statusDiv.classList.remove('hidden');
+      resultArea.classList.add('hidden');
+      questionsList.innerHTML = '';
+
+      try {
+        const base64Data = await getBase64Image(file);
+
+        // Gemini 2.5 Flash / Flash Lite へのリクエスト
+        const prompt = `
+あなたは医師国家試験の指導医です。
+添付のレジュメ/まとめノート画像から、以下の手順で学習データを作成してください。
+
+1. 【要約】: このノートに書かれている医学知識のコアエッセンスを簡潔にまとめてください。
+2. 【穴埋め問題】: ノート内の「赤色（または朱色・強調色）」で書かれている単語や数値を抽出し、それらを穴埋め【 ??? 】にした問題文を作成してください。
+3. 【解説】: なぜその単語が重要なのか、医師国家試験で問われやすい周辺知識（病態、鑑別、治療など）を1〜2文で添えてください。
+
+必ず以下のJSONスキーマのみを出力してください（Markdownのバッククォート不要）:
+{
+  "summary": "まとめ文章",
+  "questions": [
+    {
+      "question": "問題文（穴埋め部分は【 ??? 】と表記）",
+      "answer": "穴埋めの正解単語",
+      "explanation": "医師国試向けのワンポイント解説"
+    }
+  ]
+}`;
+
+        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{
+              parts: [
+                { text: prompt },
+                { inline_data: { mime_type: "image/jpeg", data: base64Data } }
+              ]
+            }],
+            generationConfig: { response_mime_type: "application/json" }
+          })
+        });
+
+        const data = await response.json();
+        const output = JSON.parse(data.candidates[0].content.parts[0].text);
+
+        // UIへの描画
+        summaryText.textContent = output.summary;
+
+        output.questions.forEach((q, idx) => {
+          const card = document.createElement('div');
+          card.className = "p-4 border rounded-xl bg-white shadow-sm space-y-2";
+          card.innerHTML = `
+            <div class="text-xs font-semibold text-slate-400">問題 ${idx + 1}</div>
+            <div class="text-sm font-medium text-slate-800">${q.question}</div>
+            <div class="pt-2">
+              <button onclick="this.nextElementSibling.classList.toggle('hidden')" class="text-xs text-blue-600 hover:underline">答え・解説を見る</button>
+              <div class="hidden mt-2 p-3 bg-slate-50 border rounded-lg text-xs space-y-1">
+                <div><span class="font-bold text-slate-700">正解:</span> <span class="text-rose-600 font-bold">${q.answer}</span></div>
+                <div class="text-slate-600 leading-relaxed"><span class="font-bold text-slate-700">解説:</span> ${q.explanation}</div>
+              </div>
+            </div>
+          `;
+          questionsList.appendChild(card);
+        });
+
+        resultArea.classList.remove('hidden');
+      } catch (err) {
+        console.error(err);
+        alert('エラーが発生しました。APIキーや画像形式を確認してください。');
+      } finally {
+        processBtn.disabled = false;
+        statusDiv.classList.add('hidden');
+      }
+    });
+  </script>
+</body>
+</html>
