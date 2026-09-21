@@ -18,11 +18,11 @@
 
   <div class="max-w-2xl mx-auto bg-white rounded-2xl shadow-sm border border-slate-200 p-6 space-y-6">
     <header class="border-b pb-4">
-      <h1 class="text-xl font-bold text-slate-900">医師国試 PDF穴埋め＆AI要約</h1>
-      <p class="text-sm text-slate-500 mt-1">PDFまたはレジュメ画像を直接解析し、赤文字の穴埋め問題と解説を生成します。</p>
+      <h1 class="text-xl font-bold text-slate-900">医師国試 PDF赤文字穴埋め</h1>
+      <p class="text-sm text-slate-500 mt-1">赤文字箇所のみを即座に問題化します（軽量・高速版）。</p>
     </header>
 
-    <!-- エラー詳細表示用バナー -->
+    <!-- エラー表示バナー -->
     <div id="errorBanner" class="hidden p-3.5 bg-rose-50 border border-rose-200 text-rose-700 text-xs rounded-lg whitespace-pre-wrap leading-relaxed"></div>
 
     <!-- APIキー入力 -->
@@ -45,25 +45,16 @@
 
     <!-- 処理ステータス -->
     <div id="status" class="hidden text-sm text-center font-medium text-blue-600 animate-pulse">
-      AIがPDF・画像を解析中...（20〜30秒ほどお待ちください）
+      <span id="statusText">AIが赤文字を抽出中...</span>
     </div>
 
     <!-- 生成結果エリア -->
-    <div id="resultArea" class="hidden space-y-6 pt-4 border-t border-slate-100">
-      <!-- 要約 -->
-      <div class="bg-blue-50/50 border border-blue-100 rounded-xl p-4">
-        <h2 class="text-xs font-bold text-blue-800 uppercase tracking-wider mb-1">知識の要約・重要ポイント</h2>
-        <p id="summaryText" class="text-sm text-slate-700 leading-relaxed whitespace-pre-wrap"></p>
+    <div id="resultArea" class="hidden space-y-4 pt-4 border-t border-slate-100">
+      <div class="flex items-center justify-between">
+        <h2 class="text-sm font-bold text-slate-800">穴埋め問題一覧</h2>
+        <span class="text-[11px] text-slate-400">※タップして答えを確認</span>
       </div>
-
-      <!-- 問題一覧 -->
-      <div class="space-y-4">
-        <div class="flex items-center justify-between">
-          <h2 class="text-sm font-bold text-slate-800">穴埋め問題演習</h2>
-          <span class="text-[11px] text-slate-400">※タップして答えを確認</span>
-        </div>
-        <div id="questionsList" class="space-y-3"></div>
-      </div>
+      <div id="questionsList" class="space-y-3"></div>
     </div>
   </div>
 
@@ -72,16 +63,14 @@
     const fileInput = document.getElementById('fileInput');
     const processBtn = document.getElementById('processBtn');
     const statusDiv = document.getElementById('status');
+    const statusText = document.getElementById('statusText');
     const errorBanner = document.getElementById('errorBanner');
     const resultArea = document.getElementById('resultArea');
-    const summaryText = document.getElementById('summaryText');
     const questionsList = document.getElementById('questionsList');
 
-    // 以前のAPIキーを復元
     apiKeyInput.value = localStorage.getItem('gemini_api_key') || '';
     apiKeyInput.addEventListener('change', () => localStorage.setItem('gemini_api_key', apiKeyInput.value));
 
-    // ファイルをBase64文字列に変換
     function fileToBase64(file) {
       return new Promise((resolve, reject) => {
         const reader = new FileReader();
@@ -93,6 +82,42 @@
         reader.onerror = (error) => reject(error);
         reader.readAsDataURL(file);
       });
+    }
+
+    // 最新モデルを最優先し、混雑時は安定版へ切り替えるリスト
+    const CANDIDATE_MODELS = [
+      "gemini-3.6-flash", // 最新の高速モデル（最優先）
+      "gemini-3.6-pro",   // 最新の高性能モデル
+      "gemini-1.5-flash", // 安定版の高速モデル
+      "gemini-1.5-pro"    // 安定版の高性能モデル
+    ];
+
+    async function generateWithFallback(apiKey, requestPayload) {
+      let lastError = null;
+
+      for (const model of CANDIDATE_MODELS) {
+        try {
+          statusText.textContent = `モデル (${model}) で抽出中...`;
+          const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(requestPayload)
+          });
+
+          if (response.ok) {
+            return await response.json();
+          }
+
+          const errData = await response.json().catch(() => ({}));
+          const errMsg = errData.error?.message || `HTTP ${response.status}`;
+          lastError = new Error(`[${model}] ${errMsg}`);
+          console.warn(`Model ${model} failed (${response.status}), falling back...`, errMsg);
+        } catch (e) {
+          lastError = e;
+        }
+      }
+
+      throw lastError || new Error('利用可能なすべてのGeminiモデルが混雑または応答不能です。少し時間を置いて再試行してください。');
     }
 
     processBtn.addEventListener('click', async () => {
@@ -115,91 +140,65 @@
         const mimeType = file.type || (file.name.toLowerCase().endsWith('.pdf') ? 'application/pdf' : 'image/jpeg');
 
         const prompt = `
-あなたは医師国家試験の指導医です。
-添付資料（PDFまたは画像）を解析し、以下の指示に従って学習用JSONデータを作成してください。
+添付資料（PDF/画像）の中から、「赤色（または朱色・ピンク・赤マーカー）」で書かれている重要単語や数値を抜き出してください。
+それぞれの単語について、前後の文脈を生かした穴埋め問題を作成してください。
+※まとめや解説は一切不要です。穴埋め問題のみを返してください。
 
-1. 【要約】: 資料に記載されている重要医学知識（疾患概念、診断基準、病態、治療など）のエッセンスを整理してください。
-2. 【穴埋め問題】: 資料内の「赤色（または朱色・ピンク）」で強調されている重要単語や数値を抜き出し、穴埋め問題を作成してください。穴埋め箇所は必ず【 ??? 】としてください。
-3. 【解説】: 各問題について、医師国試で出題されやすい周辺知識や鑑別・治療などのワンポイント解説を添えてください。
+必ず以下のJSON配列形式のみを出力してください:
+[
+  {
+    "question": "問題文（赤文字だった箇所を【 ??? 】とする）",
+    "answer": "赤文字の単語"
+  }
+]`;
 
-必ず以下の形式のJSONのみを出力してください:
-{
-  "summary": "要約文",
-  "questions": [
-    {
-      "question": "問題文（穴埋め部分は【 ??? 】）",
-      "answer": "正解単語",
-      "explanation": "解説文"
-    }
-  ]
-}`;
-
-        // Gemini 2.5 Flash にリクエスト
-        // プロパティ名をREST仕様に合わせて inlineData / mimeType に修正
-        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${apiKey}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contents: [{
-              parts: [
-                { text: prompt },
-                {
-                  inlineData: {
-                    mimeType: mimeType,
-                    data: base64Data
-                  }
+        const payload = {
+          contents: [{
+            parts: [
+              { text: prompt },
+              {
+                inlineData: {
+                  mimeType: mimeType,
+                  data: base64Data
                 }
-              ]
-            }],
-            generationConfig: {
-              responseMimeType: "application/json"
-            }
-          })
-        });
+              }
+            ]
+          }],
+          generationConfig: {
+            responseMimeType: "application/json"
+          }
+        };
 
-        if (!response.ok) {
-          const errData = await response.json();
-          const detail = errData.error?.message || JSON.stringify(errData);
-          throw new Error(`APIエラー (${response.status}): ${detail}`);
-        }
-
-        const data = await response.json();
+        const data = await generateWithFallback(apiKey, payload);
         let rawText = data.candidates?.[0]?.content?.parts?.[0]?.text;
         if (!rawText) throw new Error('AIからの応答が空でした。');
 
-        // コードブロック装飾が残っていた場合のクレンジング
         rawText = rawText.replace(/```json/g, '').replace(/```/g, '').trim();
 
-        let output;
+        let questions;
         try {
-          output = JSON.parse(rawText);
+          const parsed = JSON.parse(rawText);
+          questions = Array.isArray(parsed) ? parsed : (parsed.questions || []);
         } catch (parseErr) {
-          throw new Error(`JSON解析失敗: ${parseErr.message}\n返却テキスト: ${rawText.substring(0, 200)}...`);
+          throw new Error(`JSON解析失敗: ${parseErr.message}\n返却テキスト: ${rawText.substring(0, 150)}...`);
         }
 
-        // 要約を表示
-        summaryText.textContent = output.summary || '要約はありません。';
-
-        // 問題一覧を描画
-        if (!output.questions || output.questions.length === 0) {
+        if (!questions || questions.length === 0) {
           questionsList.innerHTML = '<p class="text-xs text-slate-500">赤文字のキーワードが見つかりませんでした。</p>';
         } else {
-          output.questions.forEach((q, idx) => {
+          questions.forEach((q, idx) => {
             const card = document.createElement('div');
-            card.className = "p-4 border rounded-xl bg-white shadow-sm space-y-2.5";
+            card.className = "p-4 border rounded-xl bg-white shadow-sm space-y-2";
             card.innerHTML = `
-              <div class="flex justify-between items-center text-xs font-semibold text-slate-400">
-                <span>問題 ${idx + 1}</span>
-              </div>
+              <div class="text-xs font-semibold text-slate-400">問題 ${idx + 1}</div>
               <div class="text-sm font-medium text-slate-800 leading-relaxed">${q.question}</div>
               
-              <div class="pt-2">
+              <div class="pt-1">
                 <button type="button" class="toggle-btn text-xs font-medium px-3 py-1.5 bg-blue-50 text-blue-700 hover:bg-blue-100 rounded-lg transition">
-                  答え・解説を見る
+                  答えを見る
                 </button>
-                <div class="answer-box hidden mt-3 p-3 bg-slate-50 border rounded-lg text-xs space-y-1.5">
-                  <div><span class="font-bold text-slate-700">正解:</span> <span class="text-rose-600 font-bold text-sm ml-1">${q.answer}</span></div>
-                  <div class="text-slate-600 leading-relaxed"><span class="font-bold text-slate-700">解説:</span> ${q.explanation}</div>
+                <div class="answer-box hidden mt-2 p-2.5 bg-slate-50 border rounded-lg text-xs">
+                  <span class="font-bold text-slate-700">正解:</span> <span class="text-rose-600 font-bold text-sm ml-1">${q.answer}</span>
                 </div>
               </div>
             `;
@@ -208,7 +207,7 @@
             const box = card.querySelector('.answer-box');
             btn.addEventListener('click', () => {
               box.classList.toggle('hidden');
-              btn.textContent = box.classList.contains('hidden') ? '答え・解説を見る' : '隠す';
+              btn.textContent = box.classList.contains('hidden') ? '答えを見る' : '隠す';
             });
 
             questionsList.appendChild(card);
